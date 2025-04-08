@@ -1,0 +1,185 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                  String    @id @default(cuid())
+  name                String?
+  email               String?   @unique
+  emailVerified       DateTime?
+  image               String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  accounts            Account[]
+  sessions            Session[]
+  orders              Order[]
+  cart                Cart?
+}
+
+// Model for NextAuth adapter
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+// Model for NextAuth adapter
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// Model for NextAuth adapter
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+
+// Enum for Record Status
+enum RecordStatus {
+  FOR_SALE
+  SOLD // If checkout process marks as sold
+  DRAFT // If you implement a draft feature
+}
+
+model Record {
+  id               String        @id @default(cuid())
+  discogsReleaseId Int           @unique // Discogs Release ID
+  discogsListingId Int?          @unique // Discogs Marketplace Listing ID - Added optional and unique
+  title            String
+  artist           String
+  label            String?
+  catalogNumber    String?
+  year             Int?
+  format           String?
+  genre            String[]      // Array of strings for genres
+  style            String[]      // Array of strings for styles
+  coverImage       String?
+  price            Float         // Price in the application's base currency
+  condition        String        // e.g., "Mint (M)", "Near Mint (NM or M-)"
+  sleeveCondition  String?       // Sleeve condition
+  quantity         Int           @default(1)
+  status           RecordStatus  @default(FOR_SALE)
+  notes            String?       // Optional seller notes
+  location         String?       // Optional private location notes
+  lastSyncedAt     DateTime      @default(now())
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+  tracks           Track[]
+  orderItems       OrderItem[]
+  cartItems        CartItem[]
+}
+
+model Track {
+  id        String  @id @default(cuid())
+  recordId  String
+  record    Record  @relation(fields: [recordId], references: [id], onDelete: Cascade)
+  position  String  // e.g., "A1", "B2"
+  title     String
+  duration  String? // e.g., "3:45"
+  // videoUrl String? // Consider storing video info separately if needed frequently
+}
+
+enum OrderStatus {
+  PENDING // Cart checkout initiated, awaiting payment
+  PAID    // Payment successful
+  SHIPPED
+  CANCELLED
+  REFUNDED
+}
+
+model Order {
+  id               String      @id @default(cuid())
+  userId           String?
+  user             User?       @relation(fields: [userId], references: [id])
+  stripeCheckoutId String?     @unique // Store Stripe Checkout Session ID
+  stripePaymentIntentId String? @unique // Store Stripe Payment Intent ID
+  status           OrderStatus @default(PENDING)
+  totalAmount      Int // Total amount in smallest currency unit (e.g., cents)
+  currency         String      @default("usd")
+  customerName     String
+  customerEmail    String
+  // Store addresses as structured JSON or dedicated Address model
+  shippingAddress  Json?
+  billingAddress   Json?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+  items            OrderItem[]
+}
+
+model OrderItem {
+  id        String @id @default(cuid())
+  orderId   String
+  order     Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  recordId  String // Reference to the Record at the time of purchase
+  record    Record @relation(fields: [recordId], references: [id], onDelete: Restrict) // Prevent deleting record if in an order
+  // Store snapshot of details at time of order
+  title     String
+  artist    String
+  price     Int    // Price per item in smallest currency unit (e.g., cents)
+  quantity  Int
+}
+
+model Cart {
+  id        String     @id @default(cuid())
+  userId    String     @unique
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  items     CartItem[]
+}
+
+model CartItem {
+  id        String   @id @default(cuid())
+  cartId    String
+  cart      Cart     @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  recordId  String
+  record    Record   @relation(fields: [recordId], references: [id], onDelete: Cascade) // If record is deleted, remove from cart
+  quantity  Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([cartId, recordId]) // User can only have one cart item per record
+}
+
+
+model WebhookLog {
+  id           String    @id @default(cuid())
+  source       String // e.g., 'stripe', 'discogs'
+  eventType    String
+  payload      Json
+  receivedAt   DateTime  @default(now())
+  processingStatus String // e.g., 'received', 'processed', 'error'
+  errorMessage String?
+}
