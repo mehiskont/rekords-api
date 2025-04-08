@@ -38,13 +38,16 @@ async function syncDiscogsInventory() {
         params: {
           page: currentPage,
           per_page: 50,
-          status: 'For Sale', // Explicitly fetching only "For Sale"
+          status: 'For Sale',
           sort: 'artist',
           sort_order: 'asc',
         },
       });
 
       if (response.data && response.data.listings) {
+        if (currentPage === 1 && response.data.pagination) {
+          console.log(`[Discogs API Pagination Check] Total items reported by API for "For Sale": ${response.data.pagination.items}, Total pages: ${response.data.pagination.pages}`);
+        }
         allListings.push(...response.data.listings);
         totalPages = response.data.pagination?.pages ?? totalPages;
         console.log(`Fetched ${response.data.listings.length} listings. Total pages: ${totalPages}`);
@@ -108,6 +111,7 @@ async function syncDiscogsInventory() {
     console.log(`Found ${existingRecordMap.size} existing records with Discogs Listing IDs.`);
 
     // 2. Map fetched Discogs listings to Prisma data format
+    console.log(`[DEBUG] Starting mapping loop. allListings.length = ${allListings.length}`);
     console.log('Mapping fetched Discogs listings...');
     const currentDataMap = new Map();
     for (const listing of allListings) {
