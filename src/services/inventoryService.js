@@ -7,9 +7,8 @@ const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 const appDiscogsUsername = process.env.DISCOGS_USERNAME;
 
 /**
- * Fetches inventory from the application's configured Discogs account 
- * and syncs it to the local Record table.
- * No longer requires userId.
+ * Fetches "For Sale" inventory from the application's configured Discogs account
+ * and syncs it to the local Record table using a transactional delta update.
  */
 async function syncDiscogsInventory() {
   console.log(`Starting Discogs inventory sync for app user ${appDiscogsUsername}`);
@@ -21,30 +20,25 @@ async function syncDiscogsInventory() {
   }
 
   try {
-    // Get the Discogs client using application credentials
-    discogsClient = await getDiscogsClient(); 
-
+    discogsClient = await getDiscogsClient();
   } catch (error) {
     console.error(`Error preparing for inventory sync:`, error.message);
     return { success: false, message: `Sync setup failed: ${error.message}` };
   }
 
   let currentPage = 1;
-  let totalPages = 1; // Assume at least one page initially
-  let syncedCount = 0;
-  let erroredCount = 0;
+  let totalPages = 1;
   const allListings = [];
 
-  // --- Fetch all listings from Discogs (handling pagination) ---
+  // --- Fetch all "For Sale" listings from Discogs (handling pagination) ---
   try {
     do {
       console.log(`Fetching inventory page ${currentPage}/${totalPages || '?'} for ${appDiscogsUsername}`);
-      // Use the application's username
       const response = await discogsClient.get(`/users/${appDiscogsUsername}/inventory`, {
         params: {
           page: currentPage,
-          per_page: 50, 
-          status: 'For Sale',
+          per_page: 50,
+          status: 'For Sale', // Explicitly fetching only "For Sale"
           sort: 'artist',
           sort_order: 'asc',
         },
@@ -56,19 +50,18 @@ async function syncDiscogsInventory() {
         console.log(`Fetched ${response.data.listings.length} listings. Total pages: ${totalPages}`);
       } else {
         console.warn('Unexpected response structure from Discogs inventory endpoint:', response.data);
-        break; // Stop if response format is wrong
+        break;
       }
 
       currentPage++;
 
-      // Basic rate limiting 
       if (currentPage <= totalPages) {
-          await delay(1100); // Slightly more than 1 second delay
+          await delay(1100);
       }
 
     } while (currentPage <= totalPages);
 
-    console.log(`Fetched a total of ${allListings.length} listings for Discogs user ${appDiscogsUsername}.`);
+    console.log(`Fetched a total of ${allListings.length} "For Sale" listings for Discogs user ${appDiscogsUsername}.`);
 
   } catch (error) {
     console.error(
@@ -78,142 +71,208 @@ async function syncDiscogsInventory() {
     return { success: false, message: `Failed during inventory fetch: ${error.message}` };
   }
 
-  // ---> ADD THIS LOG <--- 
-  console.log(`[Sync Process] Total listings fetched directly from Discogs API: ${allListings.length}`);
+  // --- Start Refactored Delta Sync Logic ---
 
-  // --- Identify and Remove Stale Listings from Local DB ---
+  let createdCount = 0;
+  let updatedCount = 0;
   let deletedCount = 0;
-  let skippedDeleteCount = 0;
-  try {
-    console.log('Checking for stale local records to remove...');
-    const fetchedListingIds = new Set(allListings.map(l => l.id)); // Get Discogs listing IDs from fetched data
+  let erroredMappingCount = 0;
 
-    // Find local records marked FOR_SALE that have a discogsListingId
-    const localForSaleRecords = await prisma.record.findMany({
+  try {
+    // 1. Fetch existing "For Sale" records from DB (using discogsListingId as key)
+    console.log('Fetching existing local records...');
+    const existingRecords = await prisma.record.findMany({
       where: {
-        status: 'FOR_SALE',
+        // We fetch all potentially synced records, not just FOR_SALE,
+        // to handle cases where a record was manually changed locally.
+        // The comparison logic will decide the outcome.
         discogsListingId: {
-          not: null, // Only consider records that have been synced previously
-        },
+          not: null,
+        }
       },
+      // Select fields needed for comparison
       select: {
         id: true,
         discogsListingId: true,
-        orderItems: { select: { id: true }, take: 1 }, // Check if linked to any OrderItem
-      },
+        price: true,
+        condition: true,
+        sleeveCondition: true,
+        status: true, // Important to check if it was manually changed locally
+        notes: true,
+        location: true,
+        coverImage: true,
+        // Select other fields if they might change on Discogs side and need syncing
+      }
     });
+    const existingRecordMap = new Map(existingRecords.map(r => [r.discogsListingId, r]));
+    console.log(`Found ${existingRecordMap.size} existing records with Discogs Listing IDs.`);
 
-    const recordsToDelete = [];
-    for (const localRecord of localForSaleRecords) {
-      if (!fetchedListingIds.has(localRecord.discogsListingId)) {
-        // This local record is no longer listed "For Sale" on Discogs
-        if (localRecord.orderItems.length > 0) {
-          // Record is linked to an order, cannot delete due to Restrict constraint
-          console.warn(`Skipping deletion of Record ID ${localRecord.id} (Discogs Listing ${localRecord.discogsListingId}) as it is part of an order.`);
-          skippedDeleteCount++;
-          // Optionally: Update status to SOLD or DRAFT here if needed?
-          // await prisma.record.update({ where: { id: localRecord.id }, data: { status: 'SOLD' } });
-        } else {
-          // Safe to delete
-          recordsToDelete.push(localRecord.id);
+    // 2. Map fetched Discogs listings to Prisma data format
+    console.log('Mapping fetched Discogs listings...');
+    const currentDataMap = new Map();
+    for (const listing of allListings) {
+        try {
+            const release = listing.release;
+            const price = listing.price?.value;
+
+            if (!release || !release.id || price === undefined || price === null) {
+                console.warn(`Skipping listing ${listing.id} due to missing release/price data.`);
+                erroredMappingCount++;
+                continue;
+            }
+
+            // Use the existing mapping logic
+            const recordData = {
+                discogsReleaseId: release.id,
+                discogsListingId: listing.id,
+                title: release.title,
+                artist: release.artist,
+                label: release.label?.[0],
+                catalogNumber: release.catalog_number,
+                year: release.year,
+                format: release.format,
+                genre: release.genres ?? [],
+                style: release.styles ?? [],
+                coverImage: (() => {
+                    const primaryImage = release.images?.find(img => img.type === 'primary');
+                    return primaryImage?.resource_url || primaryImage?.uri || release.cover_image || release.thumbnail || null;
+                })(),
+                price: parseFloat(price),
+                condition: listing.condition,
+                sleeveCondition: listing.sleeve_condition,
+                status: 'FOR_SALE', // Set status based on fetched listing
+                notes: listing.comments,
+                location: listing.location,
+                lastSyncedAt: new Date(),
+            };
+            currentDataMap.set(listing.id, recordData);
+        } catch (mapError) {
+             console.error(`Error mapping listing ${listing.id}:`, mapError.message);
+             erroredMappingCount++;
+        }
+    }
+    console.log(`Successfully mapped ${currentDataMap.size} listings. ${erroredMappingCount} errors during mapping.`);
+
+
+    // 3. Calculate differences: creates, updates, deletes
+    const recordsToCreate = [];
+    const recordsToUpdate = [];
+    const idsToDelete = new Set();
+
+    // Find records to delete (exist locally but not in fetched "For Sale" list)
+    for (const [listingId, localRecord] of existingRecordMap.entries()) {
+      if (!currentDataMap.has(listingId)) {
+        // Check if the record is part of an order before deleting
+         const orderItems = await prisma.orderItem.findMany({
+            where: { recordId: localRecord.id },
+            select: { id: true },
+            take: 1,
+         });
+         if (orderItems.length === 0) {
+            idsToDelete.add(listingId);
+         } else {
+             console.warn(`Skipping deletion of Record ID ${localRecord.id} (Discogs Listing ${listingId}) as it is part of an order. Consider changing its status manually if needed.`);
+             // Optionally update status to 'SOLD' or 'DRAFT' here?
+             // recordsToUpdate.push({ where: { discogsListingId: listingId }, data: { status: 'SOLD' } });
+         }
+      }
+    }
+
+    // Find records to create or update
+    currentDataMap.forEach((fetchedData, listingId) => {
+      const existingRecord = existingRecordMap.get(listingId);
+
+      if (!existingRecord) {
+        // New record found in Discogs "For Sale" list
+        recordsToCreate.push(fetchedData);
+      } else {
+        // Record exists locally, check if update needed
+        let needsUpdate = false;
+        // Compare relevant fields that might change
+        if (existingRecord.price !== fetchedData.price ||
+            existingRecord.condition !== fetchedData.condition ||
+            existingRecord.sleeveCondition !== fetchedData.sleeveCondition ||
+            existingRecord.notes !== fetchedData.notes ||
+            existingRecord.location !== fetchedData.location ||
+            existingRecord.status !== 'FOR_SALE' || // Update if status was changed locally
+            existingRecord.coverImage !== fetchedData.coverImage // Check if derived image changed
+           ) {
+           needsUpdate = true;
+        }
+
+        if (needsUpdate) {
+          // Don't try to update the unique identifier
+          const updateData = { ...fetchedData };
+          delete updateData.discogsListingId; // Cannot update the 'where' field
+
+          recordsToUpdate.push({
+             where: { discogsListingId: listingId },
+             data: updateData
+          });
         }
       }
+    });
+
+    console.log(`Calculated Deltas: Create: ${recordsToCreate.length}, Update: ${recordsToUpdate.length}, Delete: ${idsToDelete.size}`);
+
+    // 4. Perform DB operations within a transaction
+    if (recordsToCreate.length > 0 || recordsToUpdate.length > 0 || idsToDelete.size > 0) {
+      console.log('Starting database transaction...');
+      await prisma.$transaction(async (tx) => {
+        // Delete records
+        if (idsToDelete.size > 0) {
+          const deleteResult = await tx.record.deleteMany({
+            where: { discogsListingId: { in: Array.from(idsToDelete) } },
+          });
+          deletedCount = deleteResult.count;
+          console.log(`Deleted ${deletedCount} records.`);
+        }
+
+        // Create new records
+        if (recordsToCreate.length > 0) {
+          const createResult = await tx.record.createMany({
+            data: recordsToCreate,
+            skipDuplicates: true, // Safety net
+          });
+          createdCount = createResult.count;
+          console.log(`Created ${createdCount} records.`);
+        }
+
+        // Update existing records
+        if (recordsToUpdate.length > 0) {
+          console.log(`Attempting to update ${recordsToUpdate.length} records...`);
+          let updateSuccessCount = 0;
+          for (const update of recordsToUpdate) {
+             try {
+                  await tx.record.update(update);
+                  updateSuccessCount++;
+             } catch(updateError) {
+                  // Log individual update errors but continue transaction
+                  console.error(`Failed to update record with Listing ID ${update.where.discogsListingId}:`, updateError.message);
+             }
+          }
+          updatedCount = updateSuccessCount; // Only count successful updates
+          console.log(`Successfully updated ${updatedCount} records.`);
+        }
+      });
+      console.log('Database transaction completed.');
+    } else {
+      console.log('No database changes needed.');
     }
 
-    if (recordsToDelete.length > 0) {
-      console.log(`Attempting to delete ${recordsToDelete.length} stale local records...`);
-      const deleteResult = await prisma.record.deleteMany({
-        where: {
-          id: { in: recordsToDelete },
-        },
-      });
-      deletedCount = deleteResult.count;
-      console.log(`Successfully deleted ${deletedCount} stale records.`);
-    } else {
-      console.log('No stale local records found for deletion.');
-    }
+    console.log(`Inventory sync finished. Created: ${createdCount}, Updated: ${updatedCount}, Deleted: ${deletedCount}, Mapping Errors: ${erroredMappingCount}`);
+    return {
+        success: true,
+        created: createdCount,
+        updated: updatedCount,
+        deleted: deletedCount,
+        mappingErrors: erroredMappingCount
+    };
 
   } catch (error) {
-    console.error('Error during stale record cleanup:', error);
-    // Decide if this error should stop the whole sync. For now, we log and continue.
-    // return { success: false, message: `Failed during stale record cleanup: ${error.message}` };
+      console.error('Error during delta sync processing:', error);
+      return { success: false, message: `Sync failed during delta processing: ${error.message}` };
   }
-
-  // --- Process and Upsert fetched listings into local DB ---
-  syncedCount = 0; // Reset synced count for the upsert phase
-  erroredCount = 0;
-
-  if (allListings.length === 0) {
-      console.log(`No active listings found for Discogs user ${appDiscogsUsername}. Sync complete. Deleted: ${deletedCount}, Skipped Deletion: ${skippedDeleteCount}`);
-      // Note: We already handled deletion above. If allListings is empty, any remaining FOR_SALE were handled there.
-      return { success: true, synced: 0, errors: 0, deleted: deletedCount, skippedDelete: skippedDeleteCount };
-  }
-
-  for (const listing of allListings) {
-    try {
-      // Extract data (adjust based on actual Discogs listing structure)
-      const release = listing.release;
-      const price = listing.price?.value; // Price is an object { value: ..., currency: ... }
-
-      if (!release || !release.id) {
-          console.warn('Skipping listing with missing release data:', listing.id);
-          erroredCount++;
-          continue;
-      }
-      if (price === undefined || price === null) {
-          console.warn('Skipping listing with missing price data:', listing.id);
-          erroredCount++;
-          continue;
-      }
-
-      // Prepare data for Prisma upsert (without userId)
-      const recordData = {
-        discogsReleaseId: release.id,
-        discogsListingId: listing.id, 
-        title: release.title,
-        artist: release.artist,
-        label: release.label?.[0],
-        catalogNumber: release.catalog_number,
-        year: release.year,
-        format: release.format, 
-        genre: release.genres ?? [],
-        style: release.styles ?? [],
-        coverImage: (() => {
-          const primaryImage = release.images?.find(img => img.type === 'primary');
-          return primaryImage?.resource_url || primaryImage?.uri || release.cover_image || release.thumbnail || null;
-        })(),
-        price: parseFloat(price),
-        condition: listing.condition,
-        sleeveCondition: listing.sleeve_condition,
-        status: 'FOR_SALE',
-        notes: listing.comments,
-        location: listing.location,
-        lastSyncedAt: new Date(),
-      };
-
-      // Upsert using Discogs Listing ID as the primary identifier for sync
-      // Use discogsReleaseId as a fallback unique identifier if listing ID isn't stable or available initially
-      const upsertedRecord = await prisma.record.upsert({
-        where: { discogsListingId: listing.id }, // Primarily use listing ID
-        update: { ...recordData, discogsReleaseId: release.id /* Ensure release ID is updated too */ },
-        create: recordData, // Create needs listing ID and release ID
-      });
-
-      syncedCount++;
-      // console.log(`Upserted listing: ${recordData.artist} - ${recordData.title} (Discogs Listing ID: ${listing.id}, Local ID: ${upsertedRecord.id})`); // Less verbose log
-
-    } catch (upsertError) {
-      erroredCount++;
-      console.error(
-        `Error upserting listing (Listing ID: ${listing.id}, Release ID: ${listing.release?.id}):`,
-        upsertError.message,
-        // upsertError.stack // Stack trace can be very verbose
-      );
-    }
-  }
-
-  console.log(`Inventory sync finished for Discogs user ${appDiscogsUsername}. Synced/Updated: ${syncedCount}, Errors: ${erroredCount}, Deleted Stale: ${deletedCount}, Skipped Deletion (In Order): ${skippedDeleteCount}`);
-  return { success: true, synced: syncedCount, errors: erroredCount, deleted: deletedCount, skippedDelete: skippedDeleteCount };
 }
 
 // TODO: Implement function to process and store tracklists if needed
