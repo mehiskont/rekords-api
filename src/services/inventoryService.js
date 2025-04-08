@@ -178,7 +178,10 @@ async function syncDiscogsInventory() {
         format: release.format, 
         genre: release.genres ?? [],
         style: release.styles ?? [],
-        coverImage: release.thumbnail || release.cover_image,
+        coverImage: (() => {
+          const primaryImage = release.images?.find(img => img.type === 'primary');
+          return primaryImage?.resource_url || primaryImage?.uri || release.cover_image || release.thumbnail || null;
+        })(),
         price: parseFloat(price),
         condition: listing.condition,
         sleeveCondition: listing.sleeve_condition,
