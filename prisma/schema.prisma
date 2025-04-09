@@ -75,8 +75,8 @@ enum RecordStatus {
 
 model Record {
   id               String        @id @default(cuid())
-  discogsReleaseId Int           @unique // Discogs Release ID
-  discogsListingId Int?          @unique // Discogs Marketplace Listing ID - Added optional and unique
+  discogsReleaseId BigInt        @unique // Discogs Release ID
+  discogsListingId BigInt?       @unique // Discogs Marketplace Listing ID - Added optional and unique
   title            String
   artist           String
   label            String?

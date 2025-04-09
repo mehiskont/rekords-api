@@ -6,8 +6,17 @@ const prisma = require('./lib/prisma'); // Import Prisma client
 const authRoutes = require('./routes/authRoutes'); // Import auth routes
 const path = require('path'); // Add path module
 const cors = require('cors'); // Import cors middleware
-const { syncDiscogsInventory } = require('./services/inventoryService'); // Import sync function
+const { syncDiscogsInventory, getInventoryStats } = require('./services/inventoryService'); // Import sync function
 const { startInventorySyncJob } = require('./jobs/inventorySyncJob'); // Import job starter
+const { PrismaSessionStore } = require('@quixo3/prisma-session-store');
+const schedule = require('node-schedule');
+
+// --- Global BigInt JSON Serialization Patch ---
+// Add this block BEFORE any routes or middleware that might handle JSON
+BigInt.prototype.toJSON = function() {
+  return this.toString();
+};
+// --- End BigInt Patch ---
 
 // --- Environment Variable Checks ---
 if (!process.env.SESSION_SECRET || process.env.SESSION_SECRET === 'replace_this_with_a_strong_random_secret') {

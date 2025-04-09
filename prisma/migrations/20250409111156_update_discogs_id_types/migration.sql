@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "Record" ALTER COLUMN "discogsReleaseId" SET DATA TYPE BIGINT,
+ALTER COLUMN "discogsListingId" SET DATA TYPE BIGINT;
