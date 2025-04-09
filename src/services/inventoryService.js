@@ -1,10 +1,15 @@
 const prisma = require('../lib/prisma');
 const { getDiscogsClient } = require('../controllers/authController');
+// @ts-ignore - Import disconnect client specifically for inventory fetch
+const { Client } = require('disconnect'); 
 
 // Basic delay function to help with rate limiting
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 const appDiscogsUsername = process.env.DISCOGS_USERNAME;
+// Get consumer keys for the simple client
+const consumerKey = process.env.DISCOGS_CONSUMER_KEY;
+const consumerSecret = process.env.DISCOGS_CONSUMER_SECRET;
 
 /**
  * Fetches "For Sale" inventory from the application's configured Discogs account
@@ -12,127 +17,92 @@ const appDiscogsUsername = process.env.DISCOGS_USERNAME;
  */
 async function syncDiscogsInventory() {
   console.log(`Starting Discogs inventory sync for app user ${appDiscogsUsername}`);
-  let discogsClient;
 
   if (!appDiscogsUsername) {
       console.error('Inventory Sync Error: DISCOGS_USERNAME not set in .env');
       return { success: false, message: 'Application Discogs username not configured.' };
   }
 
-  try {
-    discogsClient = await getDiscogsClient();
-  } catch (error) {
-    console.error(`Error preparing for inventory sync:`, error.message);
-    return { success: false, message: `Sync setup failed: ${error.message}` };
+  // Instantiate a simple disconnect client for public inventory fetching
+  if (!consumerKey || !consumerSecret) {
+    console.error('Inventory Sync Error: DISCOGS_CONSUMER_KEY or DISCOGS_CONSUMER_SECRET is not set in .env for simple client.');
+    return { success: false, message: 'Consumer key/secret missing for inventory fetch.' };
   }
+  const simpleDiscogsClient = new Client({
+      consumerKey: consumerKey,
+      consumerSecret: consumerSecret,
+      // No user token needed for public inventory
+  });
 
   let currentPage = 1;
-  let totalPages = 1;
+  let totalPages = 1; // Initialize totalPages to 1 to ensure the loop runs at least once
   const allListings = [];
 
+  // REMOVED: Initial unfiltered call block
+  // // --- Fetch all "For Sale" listings from Discogs (handling pagination) ---
+  // try {
+  //   console.log(`Fetching initial page to get pagination for ALL inventory items...`);
+  //   ...
+  // } catch (error) { ... }
+
+  // REMOVED: Reset currentPage for the main loop (already 1)
+  // currentPage = 1;
+
   // --- Fetch all "For Sale" listings from Discogs (handling pagination) ---
-  try {
-    // Fetch initial page WITHOUT status filter to get pagination for ALL items,
-    // as the API doesn't report correct pagination for filtered results.
-    console.log(`Fetching initial page to get pagination for ALL inventory items...`);
-    const initialResponse = await discogsClient.get(`/users/${appDiscogsUsername}/inventory`, {
-      params: {
-        page: 1,
-        per_page: 1, // Fetch just one item to get pagination
-        // status: 'For Sale', // REMOVED: Get total pagination across all statuses
-      },
-    });
+  console.log('Starting fetch loop for "For Sale" inventory...');
+  try { // Added try-catch around the loop
+    do {
+      console.log(`Fetching inventory page ${currentPage}${totalPages > 1 ? '/'+totalPages : ''} for ${appDiscogsUsername}`);
+      // Use the simple disconnect client and its marketplace method
+      const response = await simpleDiscogsClient.marketplace().getInventory(appDiscogsUsername, {
+          status: 'For Sale', 
+          page: currentPage,
+          per_page: 100, // Changed to 100 to match successful project
+          sort: 'artist',
+          sort_order: 'asc',
+      });
+      
+      // Note: 'disconnect' library returns the parsed JSON directly, not nested under 'data' like axios
+      if (response && response.listings) {
+        const listingsFromPage = response.listings;
 
-    if (initialResponse.data && initialResponse.data.pagination) {
-      // This reflects the count and pages for ALL items
-      totalPages = initialResponse.data.pagination.pages;
-      console.log(`Discogs reports ${initialResponse.data.pagination.items} total items (all statuses) in ${totalPages} pages.`);
-    } else {
-       console.warn('Could not get initial pagination from Discogs.');
-       // Fallback or error handling if needed
+        // Log the number of items received from this page
+        console.log(`Received ${listingsFromPage.length} listings from page ${currentPage}.`);
+
+        // If it's the first page, extract the correct totalPages count from the filtered response
+        if (currentPage === 1 && response.pagination) {
+          totalPages = response.pagination.pages;
+          console.log(`Determined total pages for 'For Sale' items: ${totalPages} (based on first page response)`);
+        }
+
+        allListings.push(...listingsFromPage); // Add all listings from the page
+        console.log(`[DEBUG] Fetched page ${currentPage}/${totalPages}. allListings.length is now: ${allListings.length}`);
+      } else {
+        console.warn('Unexpected response structure from Discogs inventory endpoint:', response);
+        break;
+      }
+
+      currentPage++;
+
+      if (currentPage <= totalPages) {
+          await delay(1100);
+      }
+
+    } while (currentPage <= totalPages);
+
+  } catch (error) { // Catch block for the loop
+    console.error(`Error during inventory fetch loop:`, error.message || error);
+    if (error.statusCode === 404) { // Example: Handle user not found
+         console.error(`Discogs user ${appDiscogsUsername} not found.`);
+    } else if (error.statusCode === 429) { // Example: Rate limit
+         console.error('Discogs Rate Limit Hit during inventory fetch.');
     }
-    // We will iterate through all pages, but the loop call below uses 'status=For Sale'
-    // to ensure we only process relevant listings per page.
-
-  } catch (error) {
-    console.error(`Error during initial pagination fetch:`, error.response?.data || error.message);
-    return { success: false, message: `Failed during initial fetch: ${error.message}` }; // Exit if initial fetch fails
+    return { success: false, message: `Sync failed during fetch loop: ${error.message || 'Unknown error'}` };
   }
 
-  // Reset currentPage for the main loop
-  currentPage = 1;
+  console.log(`Fetched a total of ${allListings.length} listings for Discogs user ${appDiscogsUsername}.`);
 
-  do {
-    // Fetch page using the totalPages determined by the initial *unfiltered* call.
-    // REMOVED status filter from the API call parameters.
-    console.log(`Fetching inventory page ${currentPage}/${totalPages} (all statuses) for ${appDiscogsUsername}`);
-    const response = await discogsClient.get(`/users/${appDiscogsUsername}/inventory`, {
-      params: {
-        page: currentPage,
-        per_page: 50,
-        // status: 'For Sale', // REMOVED: Fetch all statuses and filter locally later
-        sort: 'artist',
-        sort_order: 'asc',
-      },
-    });
-
-    if (response.data && response.data.listings) {
-      // Directly use the listings returned by the API since we filtered via API parameter
-      const listingsFromPage = response.data.listings;
-
-      // Remove the local filter for 'Draft' status
-      // const forSaleListings = response.data.listings.filter(
-      //   listing => listing.status === 'Draft'
-      // );
-
-      // Log the number of items received from this page
-      console.log(`Received ${listingsFromPage.length} listings from page ${currentPage}.`);
-
-      // Removed status distribution logging as it's less relevant now
-      // if (currentPage === 1) { ... }
-
-      // Removed log comparing filtered length vs total length
-      // if (forSaleListings.length < response.data.listings.length) { ... }
-
-      allListings.push(...listingsFromPage); // Add all listings from the page
-      // totalPages is already set from the initial call
-      console.log(`[DEBUG] Fetched page ${currentPage}/${totalPages}. allListings.length is now: ${allListings.length}`);
-    } else {
-      console.warn('Unexpected response structure from Discogs inventory endpoint:', response.data);
-      break;
-    }
-
-    currentPage++;
-
-    if (currentPage <= totalPages) {
-        await delay(1100);
-    }
-
-  } while (currentPage <= totalPages);
-
-  console.log(`Fetched a total of ${allListings.length} listings (all statuses) for Discogs user ${appDiscogsUsername}.`);
-
-  // --- DEBUG: Analyze received data ---
-  if (allListings.length > 0) {
-    // Log the entire first listing object
-    console.log('[DEBUG] First listing object received:', JSON.stringify(allListings[0], null, 2));
-
-    // Count all unique statuses found in the data
-    const statusCounts = {};
-    allListings.forEach(listing => {
-      const status = listing.status || '_undefined_'; // Handle missing status
-      statusCounts[status] = (statusCounts[status] || 0) + 1;
-    });
-    console.log('[DEBUG] Status counts in received data:', statusCounts);
-
-  } else {
-    console.log('[DEBUG] allListings array is empty before analysis.');
-  }
-  // --- END DEBUG ---
-
-  // Filter locally for items with status "Draft" as this indicates "For Sale" in the received data
-  const forSaleListings = allListings.filter(listing => listing.status === 'Draft');
-  console.log(`Filtered down to ${forSaleListings.length} actual \"Draft\" (For Sale) listings.`);
+  // --- DEBUG: Analyze received data (Optional, can be removed if sync is stable) ---\n    if (allListings.length > 0) {\n      // Log the entire first listing object\n      console.log(\'[DEBUG] First listing object received:\', JSON.stringify(allListings[0], null, 2));\n\n      // Count all unique statuses found in the data\n      const statusCounts = {};\n      allListings.forEach(listing => {\n        const status = listing.status || \'_undefined_\'; // Handle missing status\n        statusCounts[status] = (statusCounts[status] || 0) + 1;\n      });\n      console.log(\'[DEBUG] Status counts in received data (should ideally be only \'For Sale\'):\', statusCounts);\n\n    } else {\n      console.log(\'[DEBUG] allListings array is empty before analysis.\');\n    }\n    // --- END DEBUG ---\n\n    // REMOVED: Local filter for 'Draft' status is no longer needed as API provides filtered data.\n    // const forSaleListings = allListings.filter(listing => listing.status === \'Draft\');\n    // console.log(`Filtered down to ${forSaleListings.length} actual \\\"Draft\\\" (For Sale) listings.`);\n\n    // Use allListings directly as it should now contain only "For Sale" items.\n    const forSaleListings = allListings;\n    console.log(`Using ${forSaleListings.length} \"For Sale\" listings fetched directly from API.`);\n\n    // --- Start Refactored Delta Sync Logic ---\n
 
   // --- Start Refactored Delta Sync Logic ---
 
@@ -186,11 +156,11 @@ async function syncDiscogsInventory() {
     console.log(`- ${existingRecords.length - existingRecordMap.size} lack Discogs Listing IDs`);
 
     // 2. Map fetched Discogs listings to Prisma data format
-    console.log(`[DEBUG] Starting mapping loop. Number of "For Sale" listings to map: ${forSaleListings.length}`);
+    console.log(`[DEBUG] Starting mapping loop. Number of "For Sale" listings to map: ${allListings.length}`);
     console.log('Mapping fetched Discogs listings...');
     const currentDataMap = new Map();
     let mappingLoopCounter = 0; // Add counter for debugging
-    for (const listing of forSaleListings) { // Map the filtered list
+    for (const listing of allListings) { // Map the filtered list
         mappingLoopCounter++;
         // Add initial log for each iteration
         // console.log(`[DEBUG] Mapping loop iteration ${mappingLoopCounter}/${forSaleListings.length}, Processing Listing ID: ${listing.id}`);
@@ -200,7 +170,7 @@ async function syncDiscogsInventory() {
 
             if (!release || !release.id || price === undefined || price === null) {
                 // Log skipped items
-                console.warn(`[DEBUG] Skipping item ${mappingLoopCounter}/${forSaleListings.length}, Listing ID: ${listing.id}. Reason: Missing release (${!!release}), release.id (${release?.id}), or price (${price})`);
+                console.warn(`[DEBUG] Skipping item ${mappingLoopCounter}/${allListings.length}, Listing ID: ${listing.id}. Reason: Missing release (${!!release}), release.id (${release?.id}), or price (${price})`);
                 erroredMappingCount++;
                 continue;
             }
@@ -231,9 +201,9 @@ async function syncDiscogsInventory() {
             };
             currentDataMap.set(listing.id, recordData);
             // Uncomment and use this detailed log for successful mapping
-            console.log(`[DEBUG] Mapped item ${mappingLoopCounter}/${forSaleListings.length}, Listing ID: ${listing.id}. currentDataMap size: ${currentDataMap.size}`);
+            console.log(`[DEBUG] Mapped item ${mappingLoopCounter}/${allListings.length}, Listing ID: ${listing.id}. currentDataMap size: ${currentDataMap.size}`);
         } catch (mapError) {
-             console.error(`[DEBUG] Error mapping item ${mappingLoopCounter}/${forSaleListings.length}, Listing ID: ${listing.id}:`, mapError.message);
+             console.error(`[DEBUG] Error mapping item ${mappingLoopCounter}/${allListings.length}, Listing ID: ${listing.id}:`, mapError.message);
              erroredMappingCount++;
         }
     }
@@ -409,7 +379,7 @@ async function syncDiscogsInventory() {
         updated: updatedCount,
         deleted: deletedCount,
         mappingErrors: erroredMappingCount,
-        totalForSale: forSaleListings.length,
+        totalForSale: allListings.length,
         totalRecordsProcessed: existingRecords.length
     };
 
