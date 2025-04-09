@@ -3,7 +3,24 @@ const { getDiscogsClient } = require('./authController'); // To potentially fetc
 
 // GET /api/records
 exports.listRecords = async (req, res, next) => {
-  const { q, genre, sort, page = 1, perPage = 18 } = req.query;
+  const {
+    q,
+    category = 'everything', // Default to 'everything' if not provided
+    genre,
+    sort,
+    page = 1,
+    perPage = 18,
+    include_catalog, // No default, check for 'true' string
+    include_release, // No default, check for 'true' string
+    include_all_fields, // No default, check for 'true' string
+    // refresh parameter is extracted but not used yet
+    refresh
+  } = req.query;
+
+  // Parse boolean flags (query params are strings)
+  const includeCatalog = include_catalog === 'true';
+  const includeRelease = include_release === 'true'; // Currently overlaps with category='releases'
+  const includeAllFields = include_all_fields === 'true';
 
   const pageNum = parseInt(page, 10);
   const perPageNum = parseInt(perPage, 10);
@@ -15,14 +32,57 @@ exports.listRecords = async (req, res, next) => {
     // Add other conditions based on query params
   };
 
-  // Search query (simple text search across title, artist, label)
+  // Search query (dynamic text search based on category and flags)
   if (q) {
-    where.OR = [
-      { title: { contains: q, mode: 'insensitive' } },
-      { artist: { contains: q, mode: 'insensitive' } },
-      { label: { contains: q, mode: 'insensitive' } },
-      // Add catalogNumber, etc. if desired
-    ];
+    let searchFields = [];
+
+    // Determine which fields to search based on flags and category
+    if (includeAllFields) {
+      // Search across a wider set of fields (adjust as needed)
+      searchFields = ['title', 'artist', 'label', 'catalogNumber', 'format', 'notes'];
+    } else if (includeCatalog) {
+      // Prioritize catalog number search, but include basics
+      searchFields = ['title', 'artist', 'label', 'catalogNumber'];
+    } else {
+      // Category-specific search (defaulting to 'everything')
+      switch (category.toLowerCase()) {
+        case 'releases':
+          searchFields = ['title']; // Maybe add tracklist if relevant later
+          break;
+        case 'artists':
+          searchFields = ['artist'];
+          break;
+        case 'labels':
+          searchFields = ['label'];
+          break;
+        case 'everything':
+        default:
+          searchFields = ['title', 'artist', 'label'];
+          break;
+      }
+    }
+
+    // Build the OR query dynamically
+    // Ensure these fields exist in your Prisma schema!
+    where.OR = searchFields
+      .filter(field => field) // Ensure no undefined fields slip in
+      .map(field => ({
+        [field]: { contains: q, mode: 'insensitive' }
+      }));
+
+    // Handle potential empty OR array if no valid fields are found
+    if (where.OR.length === 0) {
+        // If no valid search fields are identified, maybe return no results
+        // or default to a basic search? For now, let Prisma handle empty OR.
+        // An empty OR in Prisma might behave differently depending on version.
+        // Let's ensure it doesn't crash - add a default search if empty.
+        console.warn(`Search query "${q}" with category "${category}" and flags resulted in no valid search fields.`);
+        where.OR = [ // Fallback to basic search
+           { title: { contains: q, mode: 'insensitive' } },
+           { artist: { contains: q, mode: 'insensitive' } },
+           { label: { contains: q, mode: 'insensitive' } },
+        ]
+    }
   }
 
   // Genre filter (Prisma needs `has` for array contains)
