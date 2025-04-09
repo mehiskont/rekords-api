@@ -32,47 +32,107 @@ async function syncDiscogsInventory() {
 
   // --- Fetch all "For Sale" listings from Discogs (handling pagination) ---
   try {
-    do {
-      console.log(`Fetching inventory page ${currentPage}/${totalPages || '?'} for ${appDiscogsUsername}`);
-      const response = await discogsClient.get(`/users/${appDiscogsUsername}/inventory`, {
-        params: {
-          page: currentPage,
-          per_page: 50,
-          status: 'For Sale',
-          sort: 'artist',
-          sort_order: 'asc',
-        },
-      });
+    // Fetch initial page WITHOUT status filter to get pagination for ALL items,
+    // as the API doesn't report correct pagination for filtered results.
+    console.log(`Fetching initial page to get pagination for ALL inventory items...`);
+    const initialResponse = await discogsClient.get(`/users/${appDiscogsUsername}/inventory`, {
+      params: {
+        page: 1,
+        per_page: 1, // Fetch just one item to get pagination
+        // status: 'For Sale', // REMOVED: Get total pagination across all statuses
+      },
+    });
 
-      if (response.data && response.data.listings) {
-        if (currentPage === 1 && response.data.pagination) {
-          console.log(`[Discogs API Pagination Check] Total items reported by API for "For Sale": ${response.data.pagination.items}, Total pages: ${response.data.pagination.pages}`);
-        }
-        allListings.push(...response.data.listings);
-        totalPages = response.data.pagination?.pages ?? totalPages;
-        console.log(`Fetched ${response.data.listings.length} listings. Total pages: ${totalPages}`);
-      } else {
-        console.warn('Unexpected response structure from Discogs inventory endpoint:', response.data);
-        break;
-      }
-
-      currentPage++;
-
-      if (currentPage <= totalPages) {
-          await delay(1100);
-      }
-
-    } while (currentPage <= totalPages);
-
-    console.log(`Fetched a total of ${allListings.length} "For Sale" listings for Discogs user ${appDiscogsUsername}.`);
+    if (initialResponse.data && initialResponse.data.pagination) {
+      // This reflects the count and pages for ALL items
+      totalPages = initialResponse.data.pagination.pages;
+      console.log(`Discogs reports ${initialResponse.data.pagination.items} total items (all statuses) in ${totalPages} pages.`);
+    } else {
+       console.warn('Could not get initial pagination from Discogs.');
+       // Fallback or error handling if needed
+    }
+    // We will iterate through all pages, but the loop call below uses 'status=For Sale'
+    // to ensure we only process relevant listings per page.
 
   } catch (error) {
-    console.error(
-        `Error fetching Discogs inventory page ${currentPage} for user ${appDiscogsUsername}:`,
-        error.response?.data || error.message
-    );
-    return { success: false, message: `Failed during inventory fetch: ${error.message}` };
+    console.error(`Error during initial pagination fetch:`, error.response?.data || error.message);
+    return { success: false, message: `Failed during initial fetch: ${error.message}` }; // Exit if initial fetch fails
   }
+
+  // Reset currentPage for the main loop
+  currentPage = 1;
+
+  do {
+    // Fetch page using the totalPages determined by the initial *unfiltered* call.
+    // REMOVED status filter from the API call parameters.
+    console.log(`Fetching inventory page ${currentPage}/${totalPages} (all statuses) for ${appDiscogsUsername}`);
+    const response = await discogsClient.get(`/users/${appDiscogsUsername}/inventory`, {
+      params: {
+        page: currentPage,
+        per_page: 50,
+        // status: 'For Sale', // REMOVED: Fetch all statuses and filter locally later
+        sort: 'artist',
+        sort_order: 'asc',
+      },
+    });
+
+    if (response.data && response.data.listings) {
+      // Directly use the listings returned by the API since we filtered via API parameter
+      const listingsFromPage = response.data.listings;
+
+      // Remove the local filter for 'Draft' status
+      // const forSaleListings = response.data.listings.filter(
+      //   listing => listing.status === 'Draft'
+      // );
+
+      // Log the number of items received from this page
+      console.log(`Received ${listingsFromPage.length} listings from page ${currentPage}.`);
+
+      // Removed status distribution logging as it's less relevant now
+      // if (currentPage === 1) { ... }
+
+      // Removed log comparing filtered length vs total length
+      // if (forSaleListings.length < response.data.listings.length) { ... }
+
+      allListings.push(...listingsFromPage); // Add all listings from the page
+      // totalPages is already set from the initial call
+      console.log(`[DEBUG] Fetched page ${currentPage}/${totalPages}. allListings.length is now: ${allListings.length}`);
+    } else {
+      console.warn('Unexpected response structure from Discogs inventory endpoint:', response.data);
+      break;
+    }
+
+    currentPage++;
+
+    if (currentPage <= totalPages) {
+        await delay(1100);
+    }
+
+  } while (currentPage <= totalPages);
+
+  console.log(`Fetched a total of ${allListings.length} listings (all statuses) for Discogs user ${appDiscogsUsername}.`);
+
+  // --- DEBUG: Analyze received data ---
+  if (allListings.length > 0) {
+    // Log the entire first listing object
+    console.log('[DEBUG] First listing object received:', JSON.stringify(allListings[0], null, 2));
+
+    // Count all unique statuses found in the data
+    const statusCounts = {};
+    allListings.forEach(listing => {
+      const status = listing.status || '_undefined_'; // Handle missing status
+      statusCounts[status] = (statusCounts[status] || 0) + 1;
+    });
+    console.log('[DEBUG] Status counts in received data:', statusCounts);
+
+  } else {
+    console.log('[DEBUG] allListings array is empty before analysis.');
+  }
+  // --- END DEBUG ---
+
+  // Filter locally for items with status "Draft" as this indicates "For Sale" in the received data
+  const forSaleListings = allListings.filter(listing => listing.status === 'Draft');
+  console.log(`Filtered down to ${forSaleListings.length} actual \"Draft\" (For Sale) listings.`);
 
   // --- Start Refactored Delta Sync Logic ---
 
@@ -82,45 +142,65 @@ async function syncDiscogsInventory() {
   let erroredMappingCount = 0;
 
   try {
-    // 1. Fetch existing "For Sale" records from DB (using discogsListingId as key)
+    // 1. Fetch ALL records from DB (both with and without discogsListingId)
     console.log('Fetching existing local records...');
     const existingRecords = await prisma.record.findMany({
       where: {
-        // We fetch all potentially synced records, not just FOR_SALE,
-        // to handle cases where a record was manually changed locally.
-        // The comparison logic will decide the outcome.
-        discogsListingId: {
-          not: null,
-        }
+        // We fetch all records, including those without discogsListingId
+        status: 'FOR_SALE', // Only fetch records marked as for sale
       },
       // Select fields needed for comparison
       select: {
         id: true,
         discogsListingId: true,
+        discogsReleaseId: true, // Include releaseId for additional matching
         price: true,
         condition: true,
         sleeveCondition: true,
-        status: true, // Important to check if it was manually changed locally
+        status: true, 
         notes: true,
         location: true,
         coverImage: true,
-        // Select other fields if they might change on Discogs side and need syncing
       }
     });
-    const existingRecordMap = new Map(existingRecords.map(r => [r.discogsListingId, r]));
-    console.log(`Found ${existingRecordMap.size} existing records with Discogs Listing IDs.`);
+    
+    // Create maps for different ways of identifying records
+    const existingRecordMap = new Map(); // By listingId
+    const existingRecordsByReleaseId = new Map(); // By releaseId (fallback for records without listingId)
+    
+    existingRecords.forEach(record => {
+      // Map by discogsListingId if available
+      if (record.discogsListingId !== null) {
+        existingRecordMap.set(record.discogsListingId, record);
+      }
+      
+      // Also map by discogsReleaseId for fallback matching
+      if (!existingRecordsByReleaseId.has(record.discogsReleaseId)) {
+        existingRecordsByReleaseId.set(record.discogsReleaseId, []);
+      }
+      existingRecordsByReleaseId.get(record.discogsReleaseId).push(record);
+    });
+    
+    console.log(`Found ${existingRecords.length} total FOR_SALE records.`);
+    console.log(`- ${existingRecordMap.size} have Discogs Listing IDs`);
+    console.log(`- ${existingRecords.length - existingRecordMap.size} lack Discogs Listing IDs`);
 
     // 2. Map fetched Discogs listings to Prisma data format
-    console.log(`[DEBUG] Starting mapping loop. allListings.length = ${allListings.length}`);
+    console.log(`[DEBUG] Starting mapping loop. Number of "For Sale" listings to map: ${forSaleListings.length}`);
     console.log('Mapping fetched Discogs listings...');
     const currentDataMap = new Map();
-    for (const listing of allListings) {
+    let mappingLoopCounter = 0; // Add counter for debugging
+    for (const listing of forSaleListings) { // Map the filtered list
+        mappingLoopCounter++;
+        // Add initial log for each iteration
+        // console.log(`[DEBUG] Mapping loop iteration ${mappingLoopCounter}/${forSaleListings.length}, Processing Listing ID: ${listing.id}`);
         try {
             const release = listing.release;
             const price = listing.price?.value;
 
             if (!release || !release.id || price === undefined || price === null) {
-                console.warn(`Skipping listing ${listing.id} due to missing release/price data.`);
+                // Log skipped items
+                console.warn(`[DEBUG] Skipping item ${mappingLoopCounter}/${forSaleListings.length}, Listing ID: ${listing.id}. Reason: Missing release (${!!release}), release.id (${release?.id}), or price (${price})`);
                 erroredMappingCount++;
                 continue;
             }
@@ -150,11 +230,15 @@ async function syncDiscogsInventory() {
                 lastSyncedAt: new Date(),
             };
             currentDataMap.set(listing.id, recordData);
+            // Uncomment and use this detailed log for successful mapping
+            console.log(`[DEBUG] Mapped item ${mappingLoopCounter}/${forSaleListings.length}, Listing ID: ${listing.id}. currentDataMap size: ${currentDataMap.size}`);
         } catch (mapError) {
-             console.error(`Error mapping listing ${listing.id}:`, mapError.message);
+             console.error(`[DEBUG] Error mapping item ${mappingLoopCounter}/${forSaleListings.length}, Listing ID: ${listing.id}:`, mapError.message);
              erroredMappingCount++;
         }
     }
+    // Log the counter after the loop
+    console.log(`[DEBUG] Mapping loop finished after ${mappingLoopCounter} iterations.`);
     console.log(`Successfully mapped ${currentDataMap.size} listings. ${erroredMappingCount} errors during mapping.`);
 
 
@@ -163,7 +247,7 @@ async function syncDiscogsInventory() {
     const recordsToUpdate = [];
     const idsToDelete = new Set();
 
-    // Find records to delete (exist locally but not in fetched "For Sale" list)
+    // Find records with discogsListingId to delete (exist locally but not in fetched "For Sale" list)
     for (const [listingId, localRecord] of existingRecordMap.entries()) {
       if (!currentDataMap.has(listingId)) {
         // Check if the record is part of an order before deleting
@@ -173,12 +257,66 @@ async function syncDiscogsInventory() {
             take: 1,
          });
          if (orderItems.length === 0) {
-            idsToDelete.add(listingId);
+            idsToDelete.add(localRecord.id); // Store record ID, not listing ID
          } else {
              console.warn(`Skipping deletion of Record ID ${localRecord.id} (Discogs Listing ${listingId}) as it is part of an order. Consider changing its status manually if needed.`);
              // Optionally update status to 'SOLD' or 'DRAFT' here?
              // recordsToUpdate.push({ where: { discogsListingId: listingId }, data: { status: 'SOLD' } });
          }
+      }
+    }
+    
+    // Handle records without discogsListingId by matching on releaseId
+    // First, gather all discogsReleaseIds that are currently for sale
+    const currentReleaseIds = new Set();
+    currentDataMap.forEach(recordData => {
+      currentReleaseIds.add(recordData.discogsReleaseId);
+    });
+    
+    // Identify records to clean up or update with listing IDs
+    const recordsWithoutListingId = existingRecords.filter(r => r.discogsListingId === null);
+    console.log(`Checking ${recordsWithoutListingId.length} records without listing IDs...`);
+    
+    for (const localRecord of recordsWithoutListingId) {
+      // If the release isn't for sale anymore, mark for deletion
+      if (!currentReleaseIds.has(localRecord.discogsReleaseId)) {
+        const orderItems = await prisma.orderItem.findMany({
+          where: { recordId: localRecord.id },
+          select: { id: true },
+          take: 1,
+        });
+        if (orderItems.length === 0) {
+          idsToDelete.add(localRecord.id);
+        }
+      } else {
+        // This release is still for sale - check if we should attempt to match it
+        // with one of the current listings and update its discogsListingId
+        const matchingListing = Array.from(currentDataMap.values()).find(
+          record => 
+            record.discogsReleaseId === localRecord.discogsReleaseId &&
+            !existingRecordMap.has(record.discogsListingId)
+        );
+        
+        if (matchingListing) {
+          console.log(`Found potential match for record ${localRecord.id}: ${matchingListing.discogsListingId}`);
+          // Update this record with the listing ID instead of creating a new record
+          recordsToUpdate.push({
+            where: { id: localRecord.id },
+            data: {
+              discogsListingId: matchingListing.discogsListingId,
+              price: matchingListing.price,
+              condition: matchingListing.condition,
+              sleeveCondition: matchingListing.sleeveCondition,
+              notes: matchingListing.notes,
+              location: matchingListing.location,
+              coverImage: matchingListing.coverImage,
+              lastSyncedAt: new Date()
+            }
+          });
+          
+          // Remove this listing from currentDataMap so it won't be created as a new record
+          currentDataMap.delete(matchingListing.discogsListingId);
+        }
       }
     }
 
@@ -223,10 +361,10 @@ async function syncDiscogsInventory() {
     if (recordsToCreate.length > 0 || recordsToUpdate.length > 0 || idsToDelete.size > 0) {
       console.log('Starting database transaction...');
       await prisma.$transaction(async (tx) => {
-        // Delete records
+        // Delete records by ID
         if (idsToDelete.size > 0) {
           const deleteResult = await tx.record.deleteMany({
-            where: { discogsListingId: { in: Array.from(idsToDelete) } },
+            where: { id: { in: Array.from(idsToDelete) } },
           });
           deletedCount = deleteResult.count;
           console.log(`Deleted ${deletedCount} records.`);
@@ -270,7 +408,9 @@ async function syncDiscogsInventory() {
         created: createdCount,
         updated: updatedCount,
         deleted: deletedCount,
-        mappingErrors: erroredMappingCount
+        mappingErrors: erroredMappingCount,
+        totalForSale: forSaleListings.length,
+        totalRecordsProcessed: existingRecords.length
     };
 
   } catch (error) {
@@ -282,6 +422,71 @@ async function syncDiscogsInventory() {
 // TODO: Implement function to process and store tracklists if needed
 // async function processTracklist(userId, recordId, tracklistData) { ... }
 
+/**
+ * Get a count of inventory items from both Discogs and the local database
+ * Useful for troubleshooting sync issues
+ */
+async function getInventoryStats() {
+  try {
+    // Get local inventory counts from database
+    const localCountPromises = [
+      prisma.record.count({ where: { status: 'FOR_SALE' } }),
+      prisma.record.count({ where: { status: 'FOR_SALE', discogsListingId: null } }),
+      prisma.record.count({ where: { status: 'FOR_SALE', discogsListingId: { not: null } } }),
+    ];
+    
+    const [totalLocal, withoutListingId, withListingId] = await Promise.all(localCountPromises);
+    
+    // Get a sample from Discogs to estimate total Draft (for-sale) items
+    const discogsClient = await getDiscogsClient();
+    const username = process.env.DISCOGS_USERNAME;
+    
+    const response = await discogsClient.get(`/users/${username}/inventory`, {
+      params: {
+        page: 1,
+        per_page: 50,
+        status: 'For Sale',
+      },
+    });
+    
+    const totalItems = response.data.pagination?.items || 0;
+    const totalPages = response.data.pagination?.pages || 0;
+    
+    // Count statuses in the sample
+    const statusCount = {};
+    response.data.listings.forEach(listing => {
+      statusCount[listing.status] = (statusCount[listing.status] || 0) + 1;
+    });
+    
+    // Calculate percentage of Draft items
+    const draftCount = statusCount.Draft || 0;
+    const draftPercentage = draftCount / response.data.listings.length;
+    
+    // Estimate total Draft items across all pages
+    const estimatedDraftItems = Math.round(draftPercentage * totalItems);
+    
+    return {
+      local: {
+        total: totalLocal,
+        withoutListingId,
+        withListingId,
+      },
+      discogs: {
+        reported: totalItems,
+        pages: totalPages,
+        sampleSize: response.data.listings.length,
+        statusDistribution: statusCount,
+        draftPercentage: draftPercentage * 100,
+        estimatedForSale: estimatedDraftItems,
+      }
+    };
+  } catch (error) {
+    console.error('Error getting inventory stats:', error);
+    return { error: error.message };
+  }
+}
+
 module.exports = {
   syncDiscogsInventory,
+  getInventoryStats,
 };
