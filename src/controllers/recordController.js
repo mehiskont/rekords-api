@@ -3,7 +3,7 @@ const { getDiscogsClient } = require('./authController'); // To potentially fetc
 
 // GET /api/records
 exports.listRecords = async (req, res, next) => {
-  const { q, genre, sort, page = 1, perPage = 20 } = req.query;
+  const { q, genre, sort, page = 1, perPage = 18 } = req.query;
 
   const pageNum = parseInt(page, 10);
   const perPageNum = parseInt(perPage, 10);
