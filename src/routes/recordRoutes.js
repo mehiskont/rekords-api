@@ -14,8 +14,11 @@ const ensureAuthenticated = (req, res, next) => {
 // GET /api/records - List records with filtering, sorting, pagination
 router.get('/', recordController.listRecords);
 
-// GET /api/records/:id - Get details for a specific record
+// GET /api/records/:id - Get a specific record by internal ID
 router.get('/:id', recordController.getRecordById);
+
+// GET /api/records/:id/details - Get a specific record merged with Discogs details
+router.get('/:id/details', recordController.getRecordWithDiscogsDetails);
 
 // POST /api/inventory/refresh - (Protected/Internal) Trigger inventory sync
 // We'll add this route later, likely under a different path like /api/inventory

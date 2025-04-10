@@ -181,3 +181,80 @@ exports.getRecordById = async (req, res, next) => {
     // next(error);
   }
 };
+
+// GET /api/records/:id/details - Fetch record from DB and merge with Discogs data
+exports.getRecordWithDiscogsDetails = async (req, res, next) => {
+  const { id } = req.params;
+
+  try {
+    // 1. Fetch record from local database
+    const record = await prisma.record.findUnique({
+      where: { id: id },
+      include: {
+        tracks: true, // Include associated tracks from DB
+      },
+    });
+
+    if (!record) {
+      return res.status(404).json({ message: 'Record not found in local database' });
+    }
+
+    let discogsData = null;
+    // 2. Check if we have a discogsReleaseId and fetch from Discogs
+    if (record.discogsReleaseId) {
+      try {
+        console.log(`Fetching Discogs details for release ID: ${record.discogsReleaseId}`);
+        const discogsClient = await getDiscogsClient(); // Get authenticated client
+        const discogsResponse = await discogsClient.get(`/releases/${record.discogsReleaseId}`);
+        discogsData = discogsResponse.data;
+        console.log(`Successfully fetched Discogs details for release ID: ${record.discogsReleaseId}`);
+      } catch (discogsError) {
+        console.warn(
+          `Could not fetch Discogs details for release ${record.discogsReleaseId} (Record ID: ${id}):`,
+          discogsError.response?.data || discogsError.message
+        );
+        // Decide how to handle Discogs error: continue without Discogs data, or return an error?
+        // For now, we'll log a warning and continue, returning the DB data + a note about the error.
+        discogsData = {
+          error: 'Failed to fetch additional details from Discogs.',
+          message: discogsError.response?.data?.message || discogsError.message
+        };
+      }
+    } else {
+      console.log(`Record ID ${id} does not have a discogsReleaseId. Skipping Discogs fetch.`);
+    }
+
+    // 3. Prepare the final response object based on the local record data
+    const responseData = { ...record };
+
+    // 4. Selectively add fields from Discogs data if available
+    if (discogsData && !discogsData.error) {
+      // Add videos if it's an array
+      responseData.videos = Array.isArray(discogsData.videos) ? discogsData.videos : null;
+      // Add styles if it's an array
+      responseData.styles = Array.isArray(discogsData.styles) ? discogsData.styles : null;
+      // Add released_formatted if it exists and is a string
+      responseData.released_formatted = typeof discogsData.released_formatted === 'string' ? discogsData.released_formatted : null;
+    } else {
+      // If Discogs fetch failed or discogsReleaseId was missing, set all to null
+      responseData.videos = null;
+      responseData.styles = null;
+      responseData.released_formatted = null;
+    }
+
+    // Optionally add Discogs error message if the fetch failed
+    // if (discogsData && discogsData.error) {
+    //   responseData.discogsError = discogsData.message;
+    // }
+
+    res.status(200).json(responseData);
+
+  } catch (error) {
+    console.error(`Error fetching combined record details for ${id}:`, error);
+    if (error.code === 'P2023') { // Prisma error code for invalid ID format
+      return res.status(400).json({ message: 'Invalid record ID format' });
+    }
+    res.status(500).json({ message: 'Error fetching combined record details' });
+    // next(error);
+  }
+};
