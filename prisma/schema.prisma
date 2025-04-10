@@ -75,8 +75,8 @@ enum RecordStatus {
 
 model Record {
   id               String        @id @default(cuid())
-  discogsReleaseId BigInt        @unique // Discogs Release ID
-  discogsListingId BigInt?       @unique // Discogs Marketplace Listing ID - Added optional and unique
+  discogsReleaseId BigInt?       @unique // Discogs Release ID - Reverted to BigInt
+  discogsListingId BigInt?       @unique // Discogs Marketplace Listing ID - Reverted to BigInt
   title            String
   artist           String
   label            String?
@@ -85,6 +85,7 @@ model Record {
   format           String?
   genre            String[]      // Array of strings for genres
   style            String[]      // Array of strings for styles
+  weight           Int?          // Keep weight field (optional integer)
   coverImage       String?
   price            Float         // Price in the application's base currency
   condition        String        // e.g., "Mint (M)", "Near Mint (NM or M-)"
@@ -99,6 +100,12 @@ model Record {
   tracks           Track[]
   orderItems       OrderItem[]
   cartItems        CartItem[]
+
+  @@index([discogsListingId])
+  @@index([discogsReleaseId])
+  @@index([artist])
+  @@index([title])
+  @@index([label])
 }
 
 model Track {

@@ -10,6 +10,7 @@ const { syncDiscogsInventory, getInventoryStats } = require('./services/inventor
 const { startInventorySyncJob } = require('./jobs/inventorySyncJob'); // Import job starter
 const { PrismaSessionStore } = require('@quixo3/prisma-session-store');
 const schedule = require('node-schedule');
+const discogsRoutes = require('./routes/discogsRoutes'); // Import the new Discogs routes
 
 // --- Global BigInt JSON Serialization Patch ---
 // Add this block BEFORE any routes or middleware that might handle JSON
@@ -106,6 +107,7 @@ const cartRoutes = require('./routes/cartRoutes'); // Import cart routes
 app.use('/api/cart', cartRoutes); // Mount cart routes
 const checkoutRoutes = require('./routes/checkoutRoutes'); // Import checkout routes
 app.use('/api/checkout', checkoutRoutes); // Mount checkout routes
+app.use('/api/discogs', discogsRoutes); // Mount the new Discogs routes
 
 // --- End API Routes ---
 
