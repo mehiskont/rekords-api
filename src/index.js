@@ -51,8 +51,8 @@ app.use(
   session({
     store: new pgSession({
       pool: prisma.$pool, // Use Prisma's underlying connection pool (requires Prisma v4.x+)
-      tableName: 'Session', // Match Prisma model name
-      createTableIfMissing: false, // Prisma migrate handles table creation
+      tableName: 'user_sessions', // Use a dedicated table name
+      createTableIfMissing: true, // Let connect-pg-simple create the table if needed
     }),
     secret: process.env.SESSION_SECRET,
     resave: false,

@@ -21,6 +21,9 @@ const ensureAuthenticated = (req, res, next) => {
 // User Registration
 router.post('/register', authController.registerUser);
 
+// User Login
+router.post('/login', authController.loginUser);
+
 // Mock Authentication Routes (for Development/Testing)
 router.post('/mock-login', authController.mockLogin);
 router.post('/logout', authController.logout);

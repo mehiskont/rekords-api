@@ -152,6 +152,72 @@ exports.registerUser = async (req, res, next) => {
   }
 };
 
+// POST /api/auth/login
+exports.loginUser = async (req, res, next) => {
+  const { email, password } = req.body;
+
+  if (!email || !password) {
+    return res.status(400).json({ message: 'Email and password are required' });
+  }
+
+  try {
+    // Find user by email
+    const user = await prisma.user.findUnique({
+      where: { email },
+    });
+
+    // Check if user exists and if they have a password hash (meaning they registered via email/pass)
+    if (!user || !user.passwordHash) {
+      // Generic error for security (don't reveal if email exists or not)
+      return res.status(401).json({ message: 'Invalid email or password' });
+    }
+
+    // Compare the provided password with the stored hash
+    const isMatch = await bcrypt.compare(password, user.passwordHash);
+
+    if (!isMatch) {
+      // Passwords don't match
+      return res.status(401).json({ message: 'Invalid email or password' });
+    }
+
+    // Password is correct, login successful
+    // Regenerate session to prevent session fixation
+    req.session.regenerate((err) => {
+      if (err) {
+        console.error('Error regenerating session during login:', err);
+        return res.status(500).json({ message: 'Login failed due to server error' });
+      }
+
+      // Store user ID in session
+      req.session.userId = user.id;
+      console.log(`User ${user.id} logged in via password. Session ID: ${req.session.id}`);
+
+      // Save the session before responding
+      req.session.save((saveErr) => {
+        if (saveErr) {
+            console.error('Error saving session during login:', saveErr);
+            return res.status(500).json({ message: 'Login failed due to server error' });
+        }
+        // Respond with success and user data (excluding sensitive fields)
+        res.status(200).json({
+          message: 'Logged in successfully',
+          user: {
+            id: user.id,
+            name: user.name,
+            email: user.email,
+            // Add any other non-sensitive fields you want to return
+          }
+        });
+      });
+    });
+
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({ message: 'An error occurred during login' });
+    // next(error);
+  }
+};
+
 // POST /api/auth/mock-login (FOR DEVELOPMENT/TESTING ONLY)
 // In a real app, replace this with proper login logic (e.g., password check)
 exports.mockLogin = async (req, res, next) => {
