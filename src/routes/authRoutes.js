@@ -18,6 +18,9 @@ const ensureAuthenticated = (req, res, next) => {
 // router.delete('/discogs/disconnect', ensureAuthenticated, authController.disconnectDiscogs);
 // router.get('/discogs/status', ensureAuthenticated, authController.getDiscogsStatus);
 
+// User Registration
+router.post('/register', authController.registerUser);
+
 // Mock Authentication Routes (for Development/Testing)
 router.post('/mock-login', authController.mockLogin);
 router.post('/logout', authController.logout);

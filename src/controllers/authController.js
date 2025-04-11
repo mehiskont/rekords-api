@@ -2,6 +2,7 @@ const OAuth = require('oauth-1.0a');
 const crypto = require('crypto');
 const axios = require('axios'); // Using axios for HTTP requests
 const prisma = require('../lib/prisma');
+const bcrypt = require('bcrypt'); // Import bcrypt
 
 // --- Discogs OAuth Configuration ---
 const consumerKey = process.env.DISCOGS_CONSUMER_KEY;
@@ -88,6 +89,67 @@ exports.getDiscogsClient = async () => {
   });
 
   return discogsApi;
+};
+
+// POST /api/auth/register
+exports.registerUser = async (req, res, next) => {
+  const { name, email, password } = req.body;
+
+  // Basic input validation
+  if (!name || !email || !password) {
+    return res.status(400).json({ message: 'Name, email, and password are required' });
+  }
+
+  if (password.length < 8) { // Example: enforce minimum password length
+      return res.status(400).json({ message: 'Password must be at least 8 characters long' });
+  }
+
+  try {
+    // Check if user already exists
+    const existingUser = await prisma.user.findUnique({
+      where: { email },
+    });
+
+    if (existingUser) {
+      return res.status(409).json({ message: 'Email already in use' }); // 409 Conflict
+    }
+
+    // Hash the password
+    const saltRounds = 10; // Recommended salt rounds
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
+
+    // Create the new user
+    const newUser = await prisma.user.create({
+      data: {
+        name,
+        email,
+        passwordHash: hashedPassword, // Use the correct field name: passwordHash
+        // Initialize other fields as needed (e.g., roles, profile info)
+      },
+      // Select only non-sensitive fields to return
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        createdAt: true,
+        updatedAt: true,
+        // Exclude password hash
+      }
+    });
+
+    // Respond with the created user (excluding password)
+    // Consider logging the user in automatically here by setting up the session
+    // similar to mockLogin, if desired.
+    console.log(`User created successfully: ${newUser.email} (ID: ${newUser.id})`);
+    res.status(201).json(newUser); // 201 Created
+
+  } catch (error) {
+    console.error('Registration error:', error);
+    // Check for Prisma-specific errors if needed, e.g., validation errors
+    // if (error instanceof Prisma.PrismaClientKnownRequestError) { ... }
+    res.status(500).json({ message: 'An error occurred during registration' });
+    // next(error); // Pass to error handling middleware if you have one
+  }
 };
 
 // POST /api/auth/mock-login (FOR DEVELOPMENT/TESTING ONLY)
