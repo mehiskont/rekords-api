@@ -66,6 +66,14 @@ model VerificationToken {
   @@unique([identifier, token])
 }
 
+// Model for PrismaSessionStore
+model UserSession {
+  id        String   @id @default(cuid())
+  sid       String   @unique
+  data      String
+  expiresAt DateTime
+}
+
 
 // Enum for Record Status
 enum RecordStatus {

@@ -1,7 +1,7 @@
 require('dotenv').config(); // Load environment variables from .env file
 const express = require('express');
-const session = require('express-session');
-const pgSession = require('connect-pg-simple')(session);
+const expressSession = require('express-session');
+const pgSession = require('connect-pg-simple')(expressSession);
 const prisma = require('./lib/prisma'); // Import Prisma client
 const authRoutes = require('./routes/authRoutes'); // Import auth routes
 const path = require('path'); // Add path module
@@ -51,13 +51,13 @@ if (!process.env.SESSION_SECRET) {
 }
 
 app.use(
-  session({
+  expressSession({
     store: new PrismaSessionStore(
       prisma,
       {
         checkPeriod: 2 * 60 * 1000,  //ms
         dbRecordIdIsSessionId: true,
-        dbRecordIdFunction: undefined,
+        sessionModelName: 'UserSession', // Use the UserSession model created in migration
       }
     ),
     secret: process.env.SESSION_SECRET,

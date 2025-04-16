@@ -217,7 +217,8 @@ exports.loginUser = async (req, res, next) => {
             name: user.name,
             email: user.email,
             // Add any other non-sensitive fields you want to return
-          }
+          },
+          shouldMergeCart: true // Flag to trigger cart merge in frontend
         });
       });
     });
@@ -273,7 +274,11 @@ exports.mockLogin = async (req, res, next) => {
             console.error('Error saving session:', saveErr);
             return res.status(500).json({ message: 'Login failed' });
         }
-        res.status(200).json({ message: 'Logged in successfully', userId: user.id });
+        res.status(200).json({
+          message: 'Logged in successfully',
+          userId: user.id,
+          shouldMergeCart: true // Flag to trigger cart merge in frontend
+        });
       });
     });
 
@@ -410,11 +415,12 @@ exports.nextauthCallback = async (req, res, next) => {
           return res.status(500).json({ error: 'Authentication failed' });
         }
         
-        // Return user data in the format NextAuth expects
+        // Return user data in the format NextAuth expects with cart merge flag
         res.status(200).json({
           id: user.id,
           name: user.name || email.split('@')[0],
           email: user.email,
+          shouldMergeCart: true // Flag to trigger cart merge in frontend
         });
       });
     });
