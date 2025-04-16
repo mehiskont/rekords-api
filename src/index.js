@@ -31,14 +31,17 @@ if (!process.env.ENCRYPTION_KEY || process.env.ENCRYPTION_KEY === 'YOUR_STRONG_3
 if (!process.env.DISCOGS_CONSUMER_KEY || !process.env.DISCOGS_CONSUMER_SECRET) {
     console.warn('WARNING: DISCOGS_CONSUMER_KEY or DISCOGS_CONSUMER_SECRET not set in .env. Discogs features may fail.');
 }
+const port = process.env.PORT || 3001; // Define port for use throughout the app
+
+// Set FRONTEND_URL default if not provided
 if (!process.env.FRONTEND_URL) {
-    console.warn('WARNING: FRONTEND_URL not set in .env. Redirects might fail.');
-    process.env.FRONTEND_URL = `http://localhost:${port}`; // Provide a default for development
+    console.warn('WARNING: FRONTEND_URL not set in .env. Using default for local development.');
+    process.env.FRONTEND_URL = 'http://localhost:3000'; // Default frontend port is usually 3000
 }
+console.log(`Using FRONTEND_URL: ${process.env.FRONTEND_URL}`);
 // --- End Environment Variable Checks ---
 
 const app = express();
-const port = process.env.PORT || 3001; // Use port from .env or default to 3001
 
 // --- Session Configuration ---
 // IMPORTANT: Replace SESSION_SECRET in .env with a strong random string
@@ -49,11 +52,14 @@ if (!process.env.SESSION_SECRET) {
 
 app.use(
   session({
-    store: new pgSession({
-      pool: prisma.$pool, // Use Prisma's underlying connection pool (requires Prisma v4.x+)
-      tableName: 'user_sessions', // Use a dedicated table name
-      createTableIfMissing: true, // Let connect-pg-simple create the table if needed
-    }),
+    store: new PrismaSessionStore(
+      prisma,
+      {
+        checkPeriod: 2 * 60 * 1000,  //ms
+        dbRecordIdIsSessionId: true,
+        dbRecordIdFunction: undefined,
+      }
+    ),
     secret: process.env.SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
@@ -69,10 +75,28 @@ app.use(
 
 // --- CORS Configuration ---
 const corsOptions = {
-  origin: process.env.FRONTEND_URL, // Allow only your frontend origin
-  credentials: true, // Allow cookies/headers to be sent with requests
+  origin: function(origin, callback) {
+    // Allow requests with no origin (like mobile apps, curl, etc)
+    if (!origin) return callback(null, true);
+    
+    const allowedOrigins = process.env.NODE_ENV === 'production'
+      ? [process.env.FRONTEND_URL]
+      : [process.env.FRONTEND_URL, 'http://localhost:3000', 'http://127.0.0.1:3000'];
+    
+    if (allowedOrigins.indexOf(origin) !== -1 || !origin) {
+      callback(null, true);
+    } else {
+      console.log(`Origin ${origin} not allowed by CORS`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true, // Critical for cookies/auth
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 };
+
 app.use(cors(corsOptions));
+console.log(`CORS configured with allowed origins: ${process.env.NODE_ENV === 'production' ? process.env.FRONTEND_URL : [process.env.FRONTEND_URL, 'http://localhost:3000', 'http://127.0.0.1:3000']}`);
 // --- End CORS Configuration ---
 
 // --- Webhook Route (BEFORE express.json()) ---
@@ -91,6 +115,31 @@ app.get('/', (req, res) => {
   // req.session.views = (req.session.views || 0) + 1;
   // console.log('Session:', req.session);
   res.send('Plastik API is running!');
+});
+
+// Database status check endpoint
+app.get('/api/db-status', async (req, res) => {
+  try {
+    // Try a simple query to check DB connection
+    const recordCount = await prisma.record.count();
+    const userCount = await prisma.user.count();
+    
+    res.status(200).json({
+      status: 'ok',
+      database: {
+        connected: true,
+        records: recordCount,
+        users: userCount
+      }
+    });
+  } catch (error) {
+    console.error('Database status check failed:', error);
+    res.status(500).json({
+      status: 'error',
+      message: 'Database connection failed',
+      error: error.message
+    });
+  }
 });
 
 // --- Simple UI Page Route (REMOVED) ---

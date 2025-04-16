@@ -24,6 +24,11 @@ router.post('/register', authController.registerUser);
 // User Login
 router.post('/login', authController.loginUser);
 
+// NextAuth.js compatibility routes
+router.post('/nextauth-callback', authController.nextauthCallback);
+router.post('/callback/credentials', authController.nextauthCallback); // Alternative path to match NextAuth
+router.get('/session', authController.getSession); // Get current session data - NextAuth compatible
+
 // Mock Authentication Routes (for Development/Testing)
 router.post('/mock-login', authController.mockLogin);
 router.post('/logout', authController.logout);

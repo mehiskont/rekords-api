@@ -155,6 +155,8 @@ exports.registerUser = async (req, res, next) => {
 // POST /api/auth/login
 exports.loginUser = async (req, res, next) => {
   const { email, password } = req.body;
+  console.log('Login attempt:', { email, hasPassword: !!password });
+  console.log('Session before login:', req.session);
 
   if (!email || !password) {
     return res.status(400).json({ message: 'Email and password are required' });
@@ -166,6 +168,8 @@ exports.loginUser = async (req, res, next) => {
       where: { email },
     });
 
+    console.log('User found:', user ? { id: user.id, hasPasswordHash: !!user.passwordHash } : 'null');
+
     // Check if user exists and if they have a password hash (meaning they registered via email/pass)
     if (!user || !user.passwordHash) {
       // Generic error for security (don't reveal if email exists or not)
@@ -174,6 +178,7 @@ exports.loginUser = async (req, res, next) => {
 
     // Compare the provided password with the stored hash
     const isMatch = await bcrypt.compare(password, user.passwordHash);
+    console.log('Password match:', isMatch);
 
     if (!isMatch) {
       // Passwords don't match
@@ -191,6 +196,7 @@ exports.loginUser = async (req, res, next) => {
       // Store user ID in session
       req.session.userId = user.id;
       console.log(`User ${user.id} logged in via password. Session ID: ${req.session.id}`);
+      console.log('Session after regenerate:', req.session);
 
       // Save the session before responding
       req.session.save((saveErr) => {
@@ -198,6 +204,11 @@ exports.loginUser = async (req, res, next) => {
             console.error('Error saving session during login:', saveErr);
             return res.status(500).json({ message: 'Login failed due to server error' });
         }
+        console.log('Session saved successfully, cookie details:', {
+          name: 'connect.sid', // Default session cookie name
+          options: req.session.cookie // Log cookie options
+        });
+        
         // Respond with success and user data (excluding sensitive fields)
         res.status(200).json({
           message: 'Logged in successfully',
@@ -275,13 +286,141 @@ exports.mockLogin = async (req, res, next) => {
 
 // POST /api/auth/logout
 exports.logout = (req, res, next) => {
+  // Check if session exists
+  if (!req.session) {
+    console.log('Logout called but no session exists');
+    return res.status(200).json({ message: 'Already logged out' });
+  }
+  
+  // Log the session before destroying
+  console.log('Logout: Destroying session', { 
+    sessionId: req.session.id,
+    userId: req.session.userId
+  });
+  
   req.session.destroy((err) => {
     if (err) {
       console.error('Error destroying session:', err);
       return res.status(500).json({ message: 'Logout failed' });
     }
-    // Clears the session cookie
-    res.clearCookie('connect.sid'); // Use the default session cookie name or the one you configured
+    
+    // Clear the session cookie with same settings as used to create it
+    res.clearCookie('connect.sid', {
+      path: '/',
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+    });
+    
+    console.log('Session successfully destroyed and cookie cleared');
     res.status(200).json({ message: 'Logged out successfully' });
   });
+};
+
+// GET /api/auth/session
+// Check if user is authenticated - for NextAuth compatibility
+exports.getSession = async (req, res, next) => {
+  if (!req.session || !req.session.userId) {
+    // No active session
+    return res.status(200).json(null);
+  }
+  
+  try {
+    // Fetch current user info
+    const user = await prisma.user.findUnique({
+      where: { id: req.session.userId },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+      }
+    });
+    
+    if (!user) {
+      // User not found in database
+      console.log('Session referenced non-existent user - clearing session');
+      req.session.destroy();
+      return res.status(200).json(null);
+    }
+    
+    // Return session info in NextAuth format
+    return res.status(200).json({
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email
+      },
+      expires: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString() // 30 days
+    });
+    
+  } catch (error) {
+    console.error('Error fetching session data:', error);
+    return res.status(500).json({ error: 'Failed to get session data' });
+  }
+};
+
+// POST /api/auth/nextauth-callback
+// Special endpoint to support NextAuth.js credentials provider
+exports.nextauthCallback = async (req, res, next) => {
+  const { email, password } = req.body;
+  console.log('NextAuth callback received:', { email, hasPassword: !!password });
+  
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password are required' });
+  }
+  
+  try {
+    // Find user by email
+    const user = await prisma.user.findUnique({
+      where: { email },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        passwordHash: true,
+      }
+    });
+    
+    // Check if user exists
+    if (!user || !user.passwordHash) {
+      console.log('NextAuth: User not found or no password hash');
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    
+    // Verify password
+    const isMatch = await bcrypt.compare(password, user.passwordHash);
+    if (!isMatch) {
+      console.log('NextAuth: Password mismatch');
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    
+    // Create session same as login endpoint
+    req.session.regenerate((err) => {
+      if (err) {
+        console.error('NextAuth: Error regenerating session:', err);
+        return res.status(500).json({ error: 'Authentication failed' });
+      }
+      
+      // Store user ID in session
+      req.session.userId = user.id;
+      
+      req.session.save((saveErr) => {
+        if (saveErr) {
+          console.error('NextAuth: Error saving session:', saveErr);
+          return res.status(500).json({ error: 'Authentication failed' });
+        }
+        
+        // Return user data in the format NextAuth expects
+        res.status(200).json({
+          id: user.id,
+          name: user.name || email.split('@')[0],
+          email: user.email,
+        });
+      });
+    });
+    
+  } catch (error) {
+    console.error('NextAuth callback error:', error);
+    res.status(500).json({ error: 'Authentication failed' });
+  }
 };
